@@ -206,9 +206,9 @@ func runTest(t *testing.T, file string, test *specTest) {
 	var out string
 	var err error
 	if len(test.Partials) > 0 {
-		out, err = RenderPartials(test.Template, &StaticProvider{test.Partials}, test.Data)
+		out, err = RenderPartials(test.Template, &StaticProvider{test.Partials}, nil, test.Data)
 	} else {
-		out, err = Render(test.Template, test.Data)
+		out, err = Render(test.Template, nil, test.Data)
 	}
 	if err != nil {
 		t.Errorf("[%s %s]: %s", file, test.Name, err.Error())

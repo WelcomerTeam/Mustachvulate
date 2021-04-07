@@ -72,9 +72,9 @@ func run(cmd *cobra.Command, args []string) error {
 	var output string
 	var err error
 	if layoutFile != "" {
-		output, err = mustache.RenderFileInLayout(templatePath, layoutFile, data)
+		output, err = mustache.RenderFileInLayout(templatePath, layoutFile, nil, data)
 	} else {
-		output, err = mustache.RenderFile(templatePath, data)
+		output, err = mustache.RenderFile(templatePath, nil, data)
 	}
 	if err != nil {
 		return err

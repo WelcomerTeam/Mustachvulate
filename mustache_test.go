@@ -189,7 +189,7 @@ var tests = []Test{
 func TestBasic(t *testing.T) {
 	// Default behavior, AllowMissingVariables=true
 	for _, test := range tests {
-		output, err := Render(test.tmpl, test.context)
+		output, err := Render(test.tmpl, nil, test.context)
 		if err != nil {
 			t.Errorf("%q expected %q but got error %q", test.tmpl, test.expected, err.Error())
 		} else if output != test.expected {
@@ -201,7 +201,7 @@ func TestBasic(t *testing.T) {
 	AllowMissingVariables = false
 	defer func() { AllowMissingVariables = true }()
 	for _, test := range tests {
-		output, err := Render(test.tmpl, test.context)
+		output, err := Render(test.tmpl, nil, test.context)
 		if err != nil {
 			t.Errorf("%s expected %s but got error %s", test.tmpl, test.expected, err.Error())
 		} else if output != test.expected {
@@ -224,7 +224,7 @@ var missing = []Test{
 func TestMissing(t *testing.T) {
 	// Default behavior, AllowMissingVariables=true
 	for _, test := range missing {
-		output, err := Render(test.tmpl, test.context)
+		output, err := Render(test.tmpl, nil, test.context)
 		if err != nil {
 			t.Error(err)
 		} else if output != test.expected {
@@ -236,7 +236,7 @@ func TestMissing(t *testing.T) {
 	AllowMissingVariables = false
 	defer func() { AllowMissingVariables = true }()
 	for _, test := range missing {
-		output, err := Render(test.tmpl, test.context)
+		output, err := Render(test.tmpl, nil, test.context)
 		if err == nil {
 			t.Errorf("%q expected missing variable error but got %q", test.tmpl, output)
 		} else if !strings.Contains(err.Error(), "Missing variable") {
@@ -248,7 +248,7 @@ func TestMissing(t *testing.T) {
 func TestFile(t *testing.T) {
 	filename := path.Join(path.Join(os.Getenv("PWD"), "tests"), "test1.mustache")
 	expected := "hello world"
-	output, err := RenderFile(filename, map[string]string{"name": "world"})
+	output, err := RenderFile(filename, nil, map[string]string{"name": "world"})
 	if err != nil {
 		t.Error(err)
 	} else if output != expected {
@@ -264,7 +264,7 @@ func TestFRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	err = tmpl.FRender(&buf, map[string]string{"name": "world"})
+	err = tmpl.FRender(&buf, nil, map[string]string{"name": "world"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestPartial(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	output, err := tmpl.Render(map[string]string{"Name": "world"})
+	output, err := tmpl.Render(nil, map[string]string{"Name": "world"})
 	if err != nil {
 		t.Error(err)
 		return
@@ -312,12 +312,12 @@ func TestSectionPartial(t *testing.T) {
 }
 */
 func TestMultiContext(t *testing.T) {
-	output, err := Render(`{{hello}} {{World}}`, map[string]string{"hello": "hello"}, struct{ World string }{"world"})
+	output, err := Render(`{{hello}} {{World}}`, nil, map[string]string{"hello": "hello"}, struct{ World string }{"world"})
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	output2, err := Render(`{{hello}} {{World}}`, struct{ World string }{"world"}, map[string]string{"hello": "hello"})
+	output2, err := Render(`{{hello}} {{World}}`, nil, struct{ World string }{"world"}, map[string]string{"hello": "hello"})
 	if err != nil {
 		t.Error(err)
 		return
@@ -339,7 +339,7 @@ var malformed = []Test{
 
 func TestMalformed(t *testing.T) {
 	for _, test := range malformed {
-		output, err := Render(test.tmpl, test.context)
+		output, err := Render(test.tmpl, nil, test.context)
 		if err != nil {
 			if test.err == nil {
 				t.Error(err)
@@ -373,7 +373,7 @@ var layoutTests = []LayoutTest{
 
 func TestLayout(t *testing.T) {
 	for _, test := range layoutTests {
-		output, err := RenderInLayout(test.tmpl, test.layout, test.context)
+		output, err := RenderInLayout(test.tmpl, test.layout, nil, test.context)
 		if err != nil {
 			t.Error(err)
 		} else if output != test.expected {
@@ -395,7 +395,7 @@ func TestLayoutToWriter(t *testing.T) {
 			continue
 		}
 		var buf bytes.Buffer
-		err = tmpl.FRenderInLayout(&buf, layoutTmpl, test.context)
+		err = tmpl.FRenderInLayout(&buf, layoutTmpl, nil, test.context)
 		if err != nil {
 			t.Error(err)
 		} else if buf.String() != test.expected {
@@ -446,7 +446,7 @@ func TestPointerReceiver(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		output, err := Render(test.tmpl, test.context)
+		output, err := Render(test.tmpl, nil, test.context)
 		if err != nil {
 			t.Error(err)
 		} else if output != test.expected {

@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+
+	"github.com/Knetic/govaluate"
 )
 
 var (
@@ -466,69 +468,57 @@ func (tmpl *Template) parse() error {
 	}
 }
 
-// Evaluate interfaces and pointers looking for a value that can look up the name, via a
-// struct field, method, or map key, and return the result of the lookup.
-func lookup(contextChain []interface{}, name string, allowMissing bool) (reflect.Value, error) {
-	// dot notation
-	if name != "." && strings.Contains(name, ".") {
-		parts := strings.SplitN(name, ".", 2)
+// constructParameters converts a contextChain to a map[string]interface{}
+func constructParameters(contextChain []interface{}) (parameters govaluate.MapParameters) {
+	parameters = make(govaluate.MapParameters)
 
-		v, err := lookup(contextChain, parts[0], allowMissing)
-		if err != nil {
-			return v, err
+	for _, ctx := range contextChain {
+		v := ctx.(reflect.Value)
+		if v.Kind() == reflect.Ptr {
+			v = v.Elem()
 		}
-		return lookup([]interface{}{v}, parts[1], allowMissing)
+
+		vt := v.Type()
+
+		switch v.Kind() {
+		case reflect.Map:
+			for _, e := range v.MapKeys() {
+				parameters[e.String()] = v.MapIndex(e).Interface()
+			}
+		case reflect.Struct, reflect.Interface:
+			for i := 0; i < v.NumField(); i++ {
+				parameters[vt.Field(i).Name] = v.Field(i).Interface()
+			}
+		default:
+			println("contextChain value is not handled", v.Kind().String())
+		}
+
+		println("DONE")
 	}
 
+	return parameters
+}
+
+// Evaluate interfaces and pointers looking for a value that can look up the name, via a
+// struct field, method, or map key, and return the result of the lookup.
+func lookup(contextChain []interface{}, name string, allowMissing bool, expressions map[string]govaluate.ExpressionFunction) (reflect.Value, error) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Printf("Panic while looking up %q: %s\n", name, r)
 		}
 	}()
 
-Outer:
-	for _, ctx := range contextChain {
-		v := ctx.(reflect.Value)
-		for v.IsValid() {
-			typ := v.Type()
-			if n := v.Type().NumMethod(); n > 0 {
-				for i := 0; i < n; i++ {
-					m := typ.Method(i)
-					mtyp := m.Type
-					if m.Name == name && mtyp.NumIn() == 1 {
-						return v.Method(i).Call(nil)[0], nil
-					}
-				}
-			}
-			if name == "." {
-				return v, nil
-			}
-			switch av := v; av.Kind() {
-			case reflect.Ptr:
-				v = av.Elem()
-			case reflect.Interface:
-				v = av.Elem()
-			case reflect.Struct:
-				ret := av.FieldByName(name)
-				if ret.IsValid() {
-					return ret, nil
-				}
-				continue Outer
-			case reflect.Map:
-				ret := av.MapIndex(reflect.ValueOf(name))
-				if ret.IsValid() {
-					return ret, nil
-				}
-				continue Outer
-			default:
-				continue Outer
-			}
-		}
+	expression, err := govaluate.NewEvaluableExpressionWithFunctions(name, expressions)
+	if err != nil {
+		return reflect.ValueOf("ERROR CONSTRUCTING"), err
 	}
-	if allowMissing {
-		return reflect.Value{}, nil
+
+	result, err := expression.Eval(constructParameters(contextChain))
+	if err != nil {
+		return reflect.ValueOf("ERROR EVALUATING"), err
 	}
-	return reflect.Value{}, fmt.Errorf("Missing variable %q", name)
+
+	return reflect.ValueOf(result), nil
 }
 
 func isEmpty(v reflect.Value) bool {
@@ -565,8 +555,8 @@ loop:
 	return v
 }
 
-func renderSection(section *sectionElement, contextChain []interface{}, buf io.Writer) error {
-	value, err := lookup(contextChain, section.name, true)
+func renderSection(section *sectionElement, contextChain []interface{}, buf io.Writer, expressions map[string]govaluate.ExpressionFunction) error {
+	value, err := lookup(contextChain, section.name, true, expressions)
 	if err != nil {
 		return err
 	}
@@ -602,7 +592,7 @@ func renderSection(section *sectionElement, contextChain []interface{}, buf io.W
 	for _, ctx := range contexts {
 		chain2[0] = ctx
 		for _, elem := range section.elems {
-			if err := renderElement(elem, chain2, buf); err != nil {
+			if err := renderElement(elem, chain2, buf, expressions); err != nil {
 				return err
 			}
 		}
@@ -610,7 +600,7 @@ func renderSection(section *sectionElement, contextChain []interface{}, buf io.W
 	return nil
 }
 
-func renderElement(element interface{}, contextChain []interface{}, buf io.Writer) error {
+func renderElement(element interface{}, contextChain []interface{}, buf io.Writer, expressions map[string]govaluate.ExpressionFunction) error {
 	switch elem := element.(type) {
 	case *textElement:
 		_, err := buf.Write(elem.text)
@@ -621,7 +611,7 @@ func renderElement(element interface{}, contextChain []interface{}, buf io.Write
 				fmt.Printf("Panic while looking up %q: %s\n", elem.name, r)
 			}
 		}()
-		val, err := lookup(contextChain, elem.name, AllowMissingVariables)
+		val, err := lookup(contextChain, elem.name, AllowMissingVariables, expressions)
 		if err != nil {
 			return err
 		}
@@ -635,7 +625,7 @@ func renderElement(element interface{}, contextChain []interface{}, buf io.Write
 			}
 		}
 	case *sectionElement:
-		if err := renderSection(elem, contextChain, buf); err != nil {
+		if err := renderSection(elem, contextChain, buf, expressions); err != nil {
 			return err
 		}
 	case *partialElement:
@@ -643,16 +633,16 @@ func renderElement(element interface{}, contextChain []interface{}, buf io.Write
 		if err != nil {
 			return err
 		}
-		if err := partial.renderTemplate(contextChain, buf); err != nil {
+		if err := partial.renderTemplate(contextChain, buf, expressions); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (tmpl *Template) renderTemplate(contextChain []interface{}, buf io.Writer) error {
+func (tmpl *Template) renderTemplate(contextChain []interface{}, buf io.Writer, expressions map[string]govaluate.ExpressionFunction) error {
 	for _, elem := range tmpl.elems {
-		if err := renderElement(elem, contextChain, buf); err != nil {
+		if err := renderElement(elem, contextChain, buf, expressions); err != nil {
 			return err
 		}
 	}
@@ -661,29 +651,30 @@ func (tmpl *Template) renderTemplate(contextChain []interface{}, buf io.Writer) 
 
 // FRender uses the given data source - generally a map or struct - to
 // render the compiled template to an io.Writer.
-func (tmpl *Template) FRender(out io.Writer, context ...interface{}) error {
+func (tmpl *Template) FRender(out io.Writer, expressions map[string]govaluate.ExpressionFunction, context ...interface{}) error {
 	var contextChain []interface{}
 	for _, c := range context {
 		val := reflect.ValueOf(c)
 		contextChain = append(contextChain, val)
 	}
-	return tmpl.renderTemplate(contextChain, out)
+
+	return tmpl.renderTemplate(contextChain, out, expressions)
 }
 
 // Render uses the given data source - generally a map or struct - to render
 // the compiled template and return the output.
-func (tmpl *Template) Render(context ...interface{}) (string, error) {
+func (tmpl *Template) Render(expressions map[string]govaluate.ExpressionFunction, context ...interface{}) (string, error) {
 	var buf bytes.Buffer
-	err := tmpl.FRender(&buf, context...)
+	err := tmpl.FRender(&buf, expressions, context...)
 	return buf.String(), err
 }
 
 // RenderInLayout uses the given data source - generally a map or struct - to
 // render the compiled template and layout "wrapper" template and return the
 // output.
-func (tmpl *Template) RenderInLayout(layout *Template, context ...interface{}) (string, error) {
+func (tmpl *Template) RenderInLayout(layout *Template, expressions map[string]govaluate.ExpressionFunction, context ...interface{}) (string, error) {
 	var buf bytes.Buffer
-	err := tmpl.FRenderInLayout(&buf, layout, context...)
+	err := tmpl.FRenderInLayout(&buf, layout, expressions, context...)
 	if err != nil {
 		return "", err
 	}
@@ -693,15 +684,15 @@ func (tmpl *Template) RenderInLayout(layout *Template, context ...interface{}) (
 // FRenderInLayout uses the given data source - generally a map or
 // struct - to render the compiled templated a loayout "wrapper"
 // template to an io.Writer.
-func (tmpl *Template) FRenderInLayout(out io.Writer, layout *Template, context ...interface{}) error {
-	content, err := tmpl.Render(context...)
+func (tmpl *Template) FRenderInLayout(out io.Writer, layout *Template, expressions map[string]govaluate.ExpressionFunction, context ...interface{}) error {
+	content, err := tmpl.Render(expressions, context...)
 	if err != nil {
 		return err
 	}
 	allContext := make([]interface{}, len(context)+1)
 	copy(allContext[1:], context)
 	allContext[0] = map[string]string{"content": content}
-	return layout.FRender(out, allContext...)
+	return layout.FRender(out, expressions, allContext...)
 }
 
 // ParseString compiles a mustache template string. The resulting output can
@@ -788,28 +779,28 @@ func ParseFilePartialsRaw(filename string, forceRaw bool, partials PartialProvid
 
 // Render compiles a mustache template string and uses the the given data source
 // - generally a map or struct - to render the template and return the output.
-func Render(data string, context ...interface{}) (string, error) {
-	return RenderRaw(data, false, context...)
+func Render(data string, expressions map[string]govaluate.ExpressionFunction, context ...interface{}) (string, error) {
+	return RenderRaw(data, false, expressions, context...)
 }
 
 // RenderRaw compiles a mustache template string and uses the the given data
 // source - generally a map or struct - to render the template and return the
 // output.
-func RenderRaw(data string, forceRaw bool, context ...interface{}) (string, error) {
-	return RenderPartialsRaw(data, nil, forceRaw, context...)
+func RenderRaw(data string, forceRaw bool, expressions map[string]govaluate.ExpressionFunction, context ...interface{}) (string, error) {
+	return RenderPartialsRaw(data, nil, forceRaw, expressions, context...)
 }
 
 // RenderPartials compiles a mustache template string and uses the the given partial
 // provider and data source - generally a map or struct - to render the template
 // and return the output.
-func RenderPartials(data string, partials PartialProvider, context ...interface{}) (string, error) {
-	return RenderPartialsRaw(data, partials, false, context...)
+func RenderPartials(data string, partials PartialProvider, expressions map[string]govaluate.ExpressionFunction, context ...interface{}) (string, error) {
+	return RenderPartialsRaw(data, partials, false, expressions, context...)
 }
 
 // RenderPartialsRaw compiles a mustache template string and uses the the given
 // partial provider and data source - generally a map or struct - to render the
 // template and return the output.
-func RenderPartialsRaw(data string, partials PartialProvider, forceRaw bool, context ...interface{}) (string, error) {
+func RenderPartialsRaw(data string, partials PartialProvider, forceRaw bool, expressions map[string]govaluate.ExpressionFunction, context ...interface{}) (string, error) {
 	var tmpl *Template
 	var err error
 	if partials == nil {
@@ -820,20 +811,20 @@ func RenderPartialsRaw(data string, partials PartialProvider, forceRaw bool, con
 	if err != nil {
 		return "", err
 	}
-	return tmpl.Render(context...)
+	return tmpl.Render(expressions, context...)
 }
 
 // RenderInLayout compiles a mustache template string and layout "wrapper" and
 // uses the given data source - generally a map or struct - to render the
 // compiled templates and return the output.
-func RenderInLayout(data string, layoutData string, context ...interface{}) (string, error) {
-	return RenderInLayoutPartials(data, layoutData, nil, context...)
+func RenderInLayout(data string, layoutData string, expressions map[string]govaluate.ExpressionFunction, context ...interface{}) (string, error) {
+	return RenderInLayoutPartials(data, layoutData, nil, expressions, context...)
 }
 
 // RenderInLayoutPartials compiles a mustache template string and layout
 // "wrapper" and uses the given data source - generally a map or struct - to
 // render the compiled templates and return the output.
-func RenderInLayoutPartials(data string, layoutData string, partials PartialProvider, context ...interface{}) (string, error) {
+func RenderInLayoutPartials(data string, layoutData string, partials PartialProvider, expressions map[string]govaluate.ExpressionFunction, context ...interface{}) (string, error) {
 	var layoutTmpl, tmpl *Template
 	var err error
 	if partials == nil {
@@ -855,25 +846,25 @@ func RenderInLayoutPartials(data string, layoutData string, partials PartialProv
 		return "", err
 	}
 
-	return tmpl.RenderInLayout(layoutTmpl, context...)
+	return tmpl.RenderInLayout(layoutTmpl, expressions, context...)
 }
 
 // RenderFile loads a mustache template string from a file and compiles it, and
 // then uses the the given data source - generally a map or struct - to render
 // the template and return the output.
-func RenderFile(filename string, context ...interface{}) (string, error) {
+func RenderFile(filename string, expressions map[string]govaluate.ExpressionFunction, context ...interface{}) (string, error) {
 	tmpl, err := ParseFile(filename)
 	if err != nil {
 		return "", err
 	}
-	return tmpl.Render(context...)
+	return tmpl.Render(expressions, context...)
 }
 
 // RenderFileInLayout loads a mustache template string and layout "wrapper"
 // template string from files and compiles them, and  then uses the the given
 // data source - generally a map or struct - to render the compiled templates
 // and return the output.
-func RenderFileInLayout(filename string, layoutFile string, context ...interface{}) (string, error) {
+func RenderFileInLayout(filename string, layoutFile string, expressions map[string]govaluate.ExpressionFunction, context ...interface{}) (string, error) {
 	layoutTmpl, err := ParseFile(layoutFile)
 	if err != nil {
 		return "", err
@@ -883,5 +874,5 @@ func RenderFileInLayout(filename string, layoutFile string, context ...interface
 	if err != nil {
 		return "", err
 	}
-	return tmpl.RenderInLayout(layoutTmpl, context...)
+	return tmpl.RenderInLayout(layoutTmpl, expressions, context...)
 }
