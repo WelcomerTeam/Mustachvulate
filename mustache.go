@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"reflect"
@@ -21,6 +20,15 @@ var (
 	// is generated instead.
 	AllowMissingVariables = true
 )
+
+// RenderFunc is provided to lambda functions for rendering.
+type RenderFunc func(text string) (string, error)
+
+// LambdaFunc is the signature for lambda functions.
+type LambdaFunc func(text string, render RenderFunc) (string, error)
+
+// EscapeFunc is used for escaping non-raw values in templates.
+type EscapeFunc func(text string) string
 
 // A TagType represents the specific type of mustache tag that a Tag
 // represents. The zero TagType is not a valid type.
@@ -104,16 +112,17 @@ type Template struct {
 	elems    []interface{}
 	forceRaw bool
 	partial  PartialProvider
-}
-
-type parseError struct {
-	line    int
-	message string
+	escape   EscapeFunc
 }
 
 // Tags returns the mustache tags for the given template
 func (tmpl *Template) Tags() []Tag {
 	return extractTags(tmpl.elems)
+}
+
+// Escape sets custom escape function. By-default it is HTMLEscape.
+func (tmpl *Template) Escape(fn EscapeFunc) {
+	tmpl.escape = fn
 }
 
 func extractTags(elems []interface{}) []Tag {
@@ -168,10 +177,6 @@ func (e *partialElement) Name() string {
 
 func (e *partialElement) Tags() []Tag {
 	return nil
-}
-
-func (p parseError) Error() string {
-	return fmt.Sprintf("line %d: %s", p.line, p.message)
 }
 
 func (tmpl *Template) readString(s string) (string, error) {
@@ -266,7 +271,7 @@ func (tmpl *Template) readTag(mayStandalone bool) (*tagReadingResult, error) {
 
 	if err == io.EOF {
 		//put the remaining text in a block
-		return nil, parseError{tmpl.curline, "unmatched open tag"}
+		return nil, newError(tmpl.curline, ErrUnmatchedOpenTag)
 	}
 
 	text = text[:len(text)-len(tmpl.ctag)]
@@ -274,7 +279,7 @@ func (tmpl *Template) readTag(mayStandalone bool) (*tagReadingResult, error) {
 	//trim the close tag off the text
 	tag := strings.TrimSpace(text)
 	if len(tag) == 0 {
-		return nil, parseError{tmpl.curline, "empty tag"}
+		return nil, newError(tmpl.curline, ErrEmptyTag)
 	}
 
 	eow := tmpl.p
@@ -330,7 +335,7 @@ func (tmpl *Template) parseSection(section *sectionElement) error {
 
 		if err == io.EOF {
 			//put the remaining text in a block
-			return parseError{section.startline, "Section " + section.name + " has no closing tag"}
+			return newErrorWithReason(section.startline, ErrSectionNoClosingTag, section.name)
 		}
 
 		// put text into an item
@@ -349,7 +354,6 @@ func (tmpl *Template) parseSection(section *sectionElement) error {
 		switch tag[0] {
 		case '!':
 			//ignore comment
-			break
 		case '#', '^':
 			name := strings.TrimSpace(tag[1:])
 			se := sectionElement{name, tag[0] == '^', tmpl.curline, []interface{}{}}
@@ -361,7 +365,7 @@ func (tmpl *Template) parseSection(section *sectionElement) error {
 		case '/':
 			name := strings.TrimSpace(tag[1:])
 			if name != section.name {
-				return parseError{tmpl.curline, "interleaved closing tag: " + name}
+				return newErrorWithReason(tmpl.curline, ErrInterleavedClosingTag, name)
 			}
 			return nil
 		case '>':
@@ -373,7 +377,7 @@ func (tmpl *Template) parseSection(section *sectionElement) error {
 			section.elems = append(section.elems, partial)
 		case '=':
 			if tag[len(tag)-1] != '=' {
-				return parseError{tmpl.curline, "Invalid meta tag"}
+				return newError(tmpl.curline, ErrInvalidMetaTag)
 			}
 			tag = strings.TrimSpace(tag[1 : len(tag)-1])
 			newtags := strings.SplitN(tag, " ", 2)
@@ -425,7 +429,6 @@ func (tmpl *Template) parse() error {
 		switch tag[0] {
 		case '!':
 			//ignore comment
-			break
 		case '#', '^':
 			name := strings.TrimSpace(tag[1:])
 			se := sectionElement{name, tag[0] == '^', tmpl.curline, []interface{}{}}
@@ -435,7 +438,7 @@ func (tmpl *Template) parse() error {
 			}
 			tmpl.elems = append(tmpl.elems, &se)
 		case '/':
-			return parseError{tmpl.curline, "unmatched close tag"}
+			return newError(tmpl.curline, ErrUnmatchedCloseTag)
 		case '>':
 			name := strings.TrimSpace(tag[1:])
 			partial, err := tmpl.parsePartial(name, textResult.padding)
@@ -445,7 +448,7 @@ func (tmpl *Template) parse() error {
 			tmpl.elems = append(tmpl.elems, partial)
 		case '=':
 			if tag[len(tag)-1] != '=' {
-				return parseError{tmpl.curline, "Invalid meta tag"}
+				return newError(tmpl.curline, ErrInvalidMetaTag)
 			}
 			tag = strings.TrimSpace(tag[1 : len(tag)-1])
 			newtags := strings.SplitN(tag, " ", 2)
@@ -490,10 +493,8 @@ func constructParameters(contextChain []interface{}) (parameters govaluate.MapPa
 				parameters[vt.Field(i).Name] = v.Field(i).Interface()
 			}
 		default:
-			println("contextChain value is not handled", v.Kind().String())
+			fmt.Printf("contextChain kind %s is not handled\n", v.Kind().String())
 		}
-
-		println("DONE")
 	}
 
 	return parameters
@@ -510,12 +511,12 @@ func lookup(contextChain []interface{}, name string, allowMissing bool, expressi
 
 	expression, err := govaluate.NewEvaluableExpressionWithFunctions(name, expressions)
 	if err != nil {
-		return reflect.ValueOf("ERROR CONSTRUCTING"), err
+		return reflect.ValueOf(""), err
 	}
 
 	result, err := expression.Eval(constructParameters(contextChain))
 	if err != nil {
-		return reflect.ValueOf("ERROR EVALUATING"), err
+		return reflect.ValueOf(""), err
 	}
 
 	return reflect.ValueOf(result), nil
@@ -555,12 +556,12 @@ loop:
 	return v
 }
 
-func renderSection(section *sectionElement, contextChain []interface{}, buf io.Writer, expressions map[string]govaluate.ExpressionFunction) error {
+func (tmpl *Template) renderSection(section *sectionElement, contextChain []interface{}, buf io.Writer, expressions map[string]govaluate.ExpressionFunction) error {
 	value, err := lookup(contextChain, section.name, true, expressions)
 	if err != nil {
 		return err
 	}
-	var context = contextChain[len(contextChain)-1].(reflect.Value)
+	var context = contextChain[0].(reflect.Value)
 	var contexts = []interface{}{}
 	// if the value is nil, check if it's an inverted section
 	isEmpty := isEmpty(value)
@@ -579,8 +580,37 @@ func renderSection(section *sectionElement, contextChain []interface{}, buf io.W
 			}
 		case reflect.Map, reflect.Struct:
 			contexts = append(contexts, value)
+		case reflect.Func:
+			if val.Type().NumIn() != 2 || val.Type().NumOut() != 2 {
+				return fmt.Errorf("lambda %q doesn't match required LambaFunc signature", section.name)
+			}
+			var text bytes.Buffer
+			if err := getSectionText(section.elems, &text); err != nil {
+				return err
+			}
+			render := func(text string) (string, error) {
+				tmpl, err := ParseString(text)
+				if err != nil {
+					return "", err
+				}
+				var buf bytes.Buffer
+				if err := tmpl.renderTemplate(contextChain, &buf, expressions); err != nil {
+					return "", err
+				}
+				return buf.String(), nil
+			}
+			in := []reflect.Value{reflect.ValueOf(text.String()), reflect.ValueOf(render)}
+			res := val.Call(in)
+			if !res[1].IsNil() {
+				return fmt.Errorf("lambda %q: %w", section.name, res[1].Interface().(error))
+			}
+			fmt.Fprint(buf, res[0].String())
+			return nil
 		default:
-			contexts = append(contexts, context)
+			// Spec: Non-false sections have their value at the top of context,
+			// accessible as {{.}} or through the parent context. This gives
+			// a simple way to display content conditionally if a variable exists.
+			contexts = append(contexts, value)
 		}
 	} else if section.inverted {
 		contexts = append(contexts, context)
@@ -592,7 +622,7 @@ func renderSection(section *sectionElement, contextChain []interface{}, buf io.W
 	for _, ctx := range contexts {
 		chain2[0] = ctx
 		for _, elem := range section.elems {
-			if err := renderElement(elem, chain2, buf, expressions); err != nil {
+			if err := tmpl.renderElement(elem, chain2, buf, expressions); err != nil {
 				return err
 			}
 		}
@@ -600,7 +630,44 @@ func renderSection(section *sectionElement, contextChain []interface{}, buf io.W
 	return nil
 }
 
-func renderElement(element interface{}, contextChain []interface{}, buf io.Writer, expressions map[string]govaluate.ExpressionFunction) error {
+func getSectionText(elements []interface{}, buf io.Writer) error {
+	for _, element := range elements {
+		if err := getElementText(element, buf); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func getElementText(element interface{}, buf io.Writer) error {
+	switch elem := element.(type) {
+	case *textElement:
+		fmt.Fprintf(buf, "%s", elem.text)
+	case *varElement:
+		if elem.raw {
+			fmt.Fprintf(buf, "{{{%s}}}", elem.name)
+		} else {
+			fmt.Fprintf(buf, "{{%s}}", elem.name)
+		}
+	case *sectionElement:
+		if elem.inverted {
+			fmt.Fprintf(buf, "{{^%s}}", elem.name)
+		} else {
+			fmt.Fprintf(buf, "{{#%s}}", elem.name)
+		}
+		for _, nelem := range elem.elems {
+			if err := getElementText(nelem, buf); err != nil {
+				return err
+			}
+		}
+		fmt.Fprintf(buf, "{{/%s}}", elem.name)
+	default:
+		return fmt.Errorf("unexpected element type %T", elem)
+	}
+	return nil
+}
+
+func (tmpl *Template) renderElement(element interface{}, contextChain []interface{}, buf io.Writer, expressions map[string]govaluate.ExpressionFunction) error {
 	switch elem := element.(type) {
 	case *textElement:
 		_, err := buf.Write(elem.text)
@@ -621,11 +688,11 @@ func renderElement(element interface{}, contextChain []interface{}, buf io.Write
 				fmt.Fprint(buf, val.Interface())
 			} else {
 				s := fmt.Sprint(val.Interface())
-				template.HTMLEscape(buf, []byte(s))
+				_, _ = buf.Write([]byte(tmpl.escape(s)))
 			}
 		}
 	case *sectionElement:
-		if err := renderSection(elem, contextChain, buf, expressions); err != nil {
+		if err := tmpl.renderSection(elem, contextChain, buf, expressions); err != nil {
 			return err
 		}
 	case *partialElement:
@@ -642,7 +709,7 @@ func renderElement(element interface{}, contextChain []interface{}, buf io.Write
 
 func (tmpl *Template) renderTemplate(contextChain []interface{}, buf io.Writer, expressions map[string]govaluate.ExpressionFunction) error {
 	for _, elem := range tmpl.elems {
-		if err := renderElement(elem, contextChain, buf, expressions); err != nil {
+		if err := tmpl.renderElement(elem, contextChain, buf, expressions); err != nil {
 			return err
 		}
 	}
@@ -727,7 +794,7 @@ func ParseStringPartials(data string, partials PartialProvider) (*Template, erro
 // to efficiently render the template multiple times with different data
 // sources.
 func ParseStringPartialsRaw(data string, partials PartialProvider, forceRaw bool) (*Template, error) {
-	tmpl := Template{data, "{{", "}}", 0, 1, []interface{}{}, forceRaw, partials}
+	tmpl := Template{data, "{{", "}}", 0, 1, []interface{}{}, forceRaw, partials, template.HTMLEscapeString}
 	err := tmpl.parse()
 
 	if err != nil {
@@ -762,12 +829,12 @@ func ParseFilePartials(filename string, partials PartialProvider) (*Template, er
 // output can be used to efficiently render the template multiple times with
 // different data sources.
 func ParseFilePartialsRaw(filename string, forceRaw bool, partials PartialProvider) (*Template, error) {
-	data, err := ioutil.ReadFile(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}
 
-	tmpl := Template{string(data), "{{", "}}", 0, 1, []interface{}{}, forceRaw, partials}
+	tmpl := Template{string(data), "{{", "}}", 0, 1, []interface{}{}, forceRaw, partials, template.HTMLEscapeString}
 	err = tmpl.parse()
 
 	if err != nil {

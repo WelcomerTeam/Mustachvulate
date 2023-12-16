@@ -2,6 +2,7 @@ package mustache
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -140,6 +141,9 @@ var tests = []Test{
 	{"{{#a}}Hi {{.}}{{/a}}", map[string]interface{}{"a": []interface{}{0}}, "Hi 0", nil},
 	{"{{#a}}Hi {{.}}{{/a}}", map[string]interface{}{"a": [1]interface{}{0}}, "Hi 0", nil},
 
+	// non-false section have their value at the top of the context
+	{"{{#a}}Hi {{.}}{{/a}}", map[string]interface{}{"a": "Rob"}, "Hi Rob", nil},
+
 	//section does not exist
 	{`{{#has}}{{/has}}`, &User{"Mike", 1}, "", nil},
 
@@ -178,6 +182,24 @@ var tests = []Test{
 	{`{{#categories}}{{DisplayName}}{{/categories}}`, map[string][]*Category{
 		"categories": {&Category{"a", "b"}},
 	}, "a - b", nil},
+
+	{`{{#section}}{{#bool}}{{x}}{{/bool}}{{/section}}`,
+		map[string]interface{}{
+			"x": "broken",
+			"section": []map[string]interface{}{
+				{"x": "working", "bool": true},
+				{"x": "nope", "bool": false},
+			},
+		}, "working", nil},
+
+	{`{{#section}}{{^bool}}{{x}}{{/bool}}{{/section}}`,
+		map[string]interface{}{
+			"x": "broken",
+			"section": []map[string]interface{}{
+				{"x": "working", "bool": false},
+				{"x": "nope", "bool": true},
+			},
+		}, "working", nil},
 
 	//dotted names(dot notation)
 	{`"{{person.name}}" == "{{#person}}{{name}}{{/person}}"`, map[string]interface{}{"person": map[string]string{"name": "Joe"}}, `"Joe" == "Joe"`, nil},
@@ -239,7 +261,7 @@ func TestMissing(t *testing.T) {
 		output, err := Render(test.tmpl, nil, test.context)
 		if err == nil {
 			t.Errorf("%q expected missing variable error but got %q", test.tmpl, output)
-		} else if !strings.Contains(err.Error(), "Missing variable") {
+		} else if !strings.Contains(err.Error(), "missing variable") {
 			t.Errorf("%q expected missing variable error but got %q", test.tmpl, err.Error())
 		}
 	}
@@ -301,15 +323,15 @@ func TestPartial(t *testing.T) {
 }
 
 /*
-func TestSectionPartial(t *testing.T) {
-    filename := path.Join(path.Join(os.Getenv("PWD"), "tests"), "test3.mustache")
-    expected := "Mike\nJoe\n"
-    context := map[string]interface{}{"users": []User{{"Mike", 1}, {"Joe", 2}}}
-    output := RenderFile(filename, context)
-    if output != expected {
-        t.Fatalf("testSectionPartial expected %q got %q", expected, output)
-    }
-}
+	func TestSectionPartial(t *testing.T) {
+	    filename := path.Join(path.Join(os.Getenv("PWD"), "tests"), "test3.mustache")
+	    expected := "Mike\nJoe\n"
+	    context := map[string]interface{}{"users": []User{{"Mike", 1}, {"Joe", 2}}}
+	    output := RenderFile(filename, context)
+	    if output != expected {
+	        t.Fatalf("testSectionPartial expected %q got %q", expected, output)
+	    }
+	}
 */
 func TestMultiContext(t *testing.T) {
 	output, err := Render(`{{hello}} {{World}}`, nil, map[string]string{"hello": "hello"}, struct{ World string }{"world"})
@@ -325,6 +347,110 @@ func TestMultiContext(t *testing.T) {
 	if output != "hello world" || output2 != "hello world" {
 		t.Errorf("TestMultiContext expected %q got %q", "hello world", output)
 		return
+	}
+}
+
+func TestLambda(t *testing.T) {
+	tmpl := `{{#lambda}}Hello {{name}}. {{#sub}}{{.}} {{/sub}}{{^negsub}}nothing{{/negsub}}{{/lambda}}`
+	data := map[string]interface{}{
+		"name": "world",
+		"sub":  []string{"subv1", "subv2"},
+		"lambda": func(text string, render RenderFunc) (string, error) {
+			res, err := render(text)
+			return res + "!", err
+		},
+	}
+
+	output, err := Render(tmpl, nil, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect := "Hello world. subv1 subv2 nothing!"
+	if output != expect {
+		t.Fatalf("TestLambda expected %q got %q", expect, output)
+	}
+}
+
+func TestLambdaStruct(t *testing.T) {
+	tmpl := `{{#Lambda}}Hello {{Name}}. {{#Sub}}{{.}} {{/Sub}}{{^Negsub}}nothing{{/Negsub}}{{/Lambda}}`
+	data := struct {
+		Name   string
+		Sub    []string
+		Lambda LambdaFunc
+	}{
+		Name: "world",
+		Sub:  []string{"subv1", "subv2"},
+		Lambda: func(text string, render RenderFunc) (string, error) {
+			res, err := render(text)
+			return res + "!", err
+		},
+	}
+
+	output, err := Render(tmpl, nil, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect := "Hello world. subv1 subv2 nothing!"
+	if output != expect {
+		t.Fatalf("TestLambdaStruct expected %q got %q", expect, output)
+	}
+}
+
+func TestLambdaRawTag(t *testing.T) {
+	tmpl := `{{#Lambda}}Hello {{{Name}}}.{{/Lambda}}`
+	data := struct {
+		Name   string
+		Lambda LambdaFunc
+	}{
+		Name: "<br>",
+		Lambda: func(text string, render RenderFunc) (string, error) {
+			return render(text)
+		},
+	}
+
+	output, err := Render(tmpl, nil, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect := "Hello <br>."
+	if output != expect {
+		t.Fatalf("TestLambdaStruct expected %q got %q", expect, output)
+	}
+}
+
+func TestLambdaError(t *testing.T) {
+	tmpl := `{{#lambda}}{{/lambda}}`
+	data := map[string]interface{}{
+		"lambda": func(text string, render RenderFunc) (string, error) {
+			return "", fmt.Errorf("test err")
+		},
+	}
+	_, err := Render(tmpl, nil, data)
+	if err == nil {
+		t.Fatal("nil error")
+	}
+
+	expect := `lambda "lambda": test err`
+	if err.Error() != expect {
+		t.Fatalf("TestLambdaError expected %q got %q", expect, err.Error())
+	}
+}
+
+func TestLambdaWrongSignature(t *testing.T) {
+	tmpl := `{{#lambda}}{{/lambda}}`
+	data := map[string]interface{}{
+		"lambda": func(text string, render RenderFunc, _ string) (string, error) {
+			return render(text)
+		},
+	}
+	_, err := Render(tmpl, nil, data)
+	if err == nil {
+		t.Fatal("nil error")
+	}
+
+	expect := `lambda "lambda" doesn't match required LambaFunc signature`
+	if err.Error() != expect {
+		t.Fatalf("TestLambdaWrongSignature expected %q got %q", expect, err.Error())
 	}
 }
 
@@ -352,6 +478,40 @@ func TestMalformed(t *testing.T) {
 			} else {
 				t.Errorf("%q expected error %q but got %q", test.tmpl, test.err.Error(), output)
 			}
+		}
+	}
+}
+
+type TestWithParseError struct {
+	*Test
+	errLine   int
+	errCode   ErrorCode
+	errReason string
+}
+
+var malformedWithParseError = []TestWithParseError{
+	{Test: &Test{`{{#a}}{{}}{{/a}}`, Data{true, "hello"}, "", fmt.Errorf("line 1: empty tag")}, errLine: 1, errCode: ErrEmptyTag, errReason: ""},
+	{Test: &Test{`{{}}`, nil, "", fmt.Errorf("line 1: empty tag")}, errLine: 1, errCode: ErrEmptyTag, errReason: ""},
+	{Test: &Test{`{{}`, nil, "", fmt.Errorf("line 1: unmatched open tag")}, errLine: 1, errCode: ErrUnmatchedOpenTag, errReason: ""},
+	{Test: &Test{`{{`, nil, "", fmt.Errorf("line 1: unmatched open tag")}, errLine: 1, errCode: ErrUnmatchedOpenTag, errReason: ""},
+	// invalid syntax - https://github.com/hoisie/mustache/issues/10
+	{Test: &Test{`{{#a}}{{#b}}{{/a}}{{/b}}}`, map[string]interface{}{}, "", fmt.Errorf("line 1: interleaved closing tag: a")}, errLine: 1, errCode: ErrInterleavedClosingTag, errReason: "a"},
+}
+
+func TestParseError(t *testing.T) {
+	for _, test := range malformedWithParseError {
+		output, err := Render(test.tmpl, nil, test.context)
+		if err != nil {
+			var parseError ParseError
+			if errors.As(err, &parseError) {
+				if parseError.Line != test.errLine || parseError.Code != test.errCode || parseError.Reason != test.errReason {
+					t.Errorf("%q expected ParseError (line %q code %q reason %q) but got (line %q code %q reason %q)", test.tmpl, test.errLine, test.errCode, test.errReason, parseError.Line, parseError.Code, parseError.Reason)
+				}
+			} else {
+				t.Errorf("%q expected ParseError (line %q code %q reason %q) but got %q", test.tmpl, test.errLine, test.errCode, test.errReason, test.err.Error())
+			}
+		} else {
+			t.Errorf("%q expected error %q but got %q", test.tmpl, test.err.Error(), output)
 		}
 	}
 }
@@ -554,5 +714,25 @@ func compareTags(t *testing.T, actual []Tag, expected []tag) {
 			t.Errorf("invalid tag type: %s", tag.Type())
 			return
 		}
+	}
+}
+
+func TestCustomEscape(t *testing.T) {
+	templ, err := ParseString("Hello {{value}}!")
+	if err != nil {
+		t.Fatalf("default template should be parsed")
+	}
+	templ.Escape(func(text string) string {
+		return "!" + text + "!"
+	})
+
+	value, err := templ.Render(nil, map[string]string{"value": "world"})
+	if err != nil {
+		t.Errorf("expected to be rendered, got %v", err)
+	}
+	const expected = "Hello !world!!"
+
+	if value != expected {
+		t.Errorf("expected %s, got %v", expected, value)
 	}
 }
