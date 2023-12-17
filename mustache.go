@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	// AllowMissingVariables defines the behavior for a variable "miss." If it
+	// AllowMissingVariables defines the behaviour for a variable "miss." If it
 	// is true (the default), an empty string is emitted. If it is false, an error
 	// is generated instead.
 	AllowMissingVariables = true

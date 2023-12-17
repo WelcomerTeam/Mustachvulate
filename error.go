@@ -38,7 +38,7 @@ func (e ParseError) defaultMessage() string {
 	case ErrEmptyTag:
 		return "empty tag"
 	case ErrSectionNoClosingTag:
-		return fmt.Sprintf("Section %s has no closing tag", e.Reason)
+		return fmt.Sprintf("section %s has no closing tag", e.Reason)
 	case ErrInterleavedClosingTag:
 		return fmt.Sprintf("interleaved closing tag: %s", e.Reason)
 	case ErrInvalidMetaTag:

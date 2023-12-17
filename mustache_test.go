@@ -209,7 +209,7 @@ var tests = []Test{
 }
 
 func TestBasic(t *testing.T) {
-	// Default behavior, AllowMissingVariables=true
+	// Default behaviour, AllowMissingVariables=true
 	for _, test := range tests {
 		output, err := Render(test.tmpl, nil, test.context)
 		if err != nil {
@@ -244,7 +244,7 @@ var missing = []Test{
 }
 
 func TestMissing(t *testing.T) {
-	// Default behavior, AllowMissingVariables=true
+	// Default behaviour, AllowMissingVariables=true
 	for _, test := range missing {
 		output, err := Render(test.tmpl, nil, test.context)
 		if err != nil {
